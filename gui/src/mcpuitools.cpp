@@ -358,6 +358,59 @@ bool McpUiTools::PointFromArgs(const QJsonObject &args, const QString &x_key, co
 	return true;
 }
 
+QImage McpUiTools::Thumbnail(const QImage &frame)
+{
+	return frame.scaled(256, 144, Qt::IgnoreAspectRatio, Qt::SmoothTransformation).convertToFormat(QImage::Format_Grayscale8);
+}
+
+namespace
+{
+// Mean absolute difference of every block of a 16x9 grid; empty if the thumbnails differ in size.
+QVector<double> BlockDifferences(const QImage &a, const QImage &b)
+{
+	QVector<double> blocks;
+	if(a.size() != b.size() || a.format() != QImage::Format_Grayscale8 || b.format() != QImage::Format_Grayscale8)
+		return blocks;
+	const int bw = a.width() / 16, bh = a.height() / 9;
+	if(bw <= 0 || bh <= 0)
+		return blocks;
+	for(int by = 0; by < 9; by++)
+	{
+		for(int bx = 0; bx < 16; bx++)
+		{
+			qint64 sum = 0;
+			for(int y = by * bh; y < (by + 1) * bh; y++)
+			{
+				const uchar *pa = a.constScanLine(y), *pb = b.constScanLine(y);
+				for(int x = bx * bw; x < (bx + 1) * bw; x++)
+					sum += qAbs(int(pa[x]) - int(pb[x]));
+			}
+			blocks.append(double(sum) / (bw * bh));
+		}
+	}
+	return blocks;
+}
+}
+
+double McpUiTools::MaxBlockDifference(const QImage &a, const QImage &b)
+{
+	const QVector<double> blocks = BlockDifferences(a, b);
+	if(blocks.isEmpty())
+		return 255.0;
+	return *std::max_element(blocks.constBegin(), blocks.constEnd());
+}
+
+double McpUiTools::BlockSimilarity(const QImage &a, const QImage &b, double block_threshold)
+{
+	const QVector<double> blocks = BlockDifferences(a, b);
+	if(blocks.isEmpty())
+		return 0.0;
+	int similar = 0;
+	for(double d : blocks)
+		similar += d < block_threshold ? 1 : 0;
+	return double(similar) / blocks.size();
+}
+
 QList<int> McpUiTools::PaintOrder(const QList<Surface> &surfaces) const
 {
 	QList<int> order;
@@ -1734,32 +1787,9 @@ void McpUiTools::WaitFor(const QJsonObject &args, const QImage &baseline_frame, 
 			});
 		};
 
-		// Grayscale thumbnails are cheap to compare. The score is the largest mean difference of a
-		// 16x9 grid of blocks, so a small change (one label) counts as much as a full screen fade.
-		auto thumbnail = [](const QImage &frame) {
-			return frame.scaled(256, 144, Qt::IgnoreAspectRatio, Qt::SmoothTransformation).convertToFormat(QImage::Format_Grayscale8);
-		};
-		auto difference = [](const QImage &a, const QImage &b) {
-			if(a.size() != b.size())
-				return 255.0;
-			const int bw = a.width() / 16, bh = a.height() / 9;
-			double worst = 0.0;
-			for(int by = 0; by < 9; by++)
-			{
-				for(int bx = 0; bx < 16; bx++)
-				{
-					qint64 sum = 0;
-					for(int y = by * bh; y < (by + 1) * bh; y++)
-					{
-						const uchar *pa = a.constScanLine(y), *pb = b.constScanLine(y);
-						for(int x = bx * bw; x < (bx + 1) * bw; x++)
-							sum += qAbs(int(pa[x]) - int(pb[x]));
-					}
-					worst = qMax(worst, double(sum) / (bw * bh));
-				}
-			}
-			return worst;
-		};
+		// A small change (one label) counts as much as a full screen fade.
+		auto thumbnail = [](const QImage &frame) { return McpUiTools::Thumbnail(frame); };
+		auto difference = [](const QImage &a, const QImage &b) { return McpUiTools::MaxBlockDifference(a, b); };
 
 		if(!baseline_frame.isNull())
 		{

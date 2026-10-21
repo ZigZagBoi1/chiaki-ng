@@ -60,6 +60,8 @@ set(SOURCE_FILES
 	src/mcpuitools.cpp
 	include/mcpchiakitools.h
 	src/mcpchiakitools.cpp
+	include/mcproutines.h
+	src/mcproutines.cpp
 	)
 set(RESOURCE_FILES "")
 

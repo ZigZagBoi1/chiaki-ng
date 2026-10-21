@@ -10,6 +10,7 @@
 
 #include <chiaki/controller.h>
 
+class McpRoutines;
 class McpUiTools;
 class QmlMainWindow;
 
@@ -56,6 +57,7 @@ class McpChiakiTools : public QObject
 		McpLaunchOptions options;
 		McpServer *server = nullptr;
 		McpUiTools *ui_tools = nullptr;
+		McpRoutines *routines = nullptr;
 		quint64 controller_generation = 0;
 };
 

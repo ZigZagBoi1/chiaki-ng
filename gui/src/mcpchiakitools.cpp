@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: LicenseRef-AGPL-3.0-only-OpenSSL
 
 #include <mcpchiakitools.h>
+#include <mcproutines.h>
 #include <mcpuitools.h>
 #include <qmlbackend.h>
 #include <qmlmainwindow.h>
@@ -10,6 +11,7 @@
 #include <QCoreApplication>
 #include <QDateTime>
 #include <QElapsedTimer>
+#include <QFile>
 #include <QJsonDocument>
 #include <QMetaEnum>
 #include <QSharedPointer>
@@ -20,7 +22,11 @@ namespace
 constexpr int kMaxControllerSequenceMs = 60000;
 
 const char *const kInstructions =
-	"You are controlling chiaki-ng, a PlayStation Remote Play client. Call get_usage_guide once for the full playbook.\n"
+	"You are controlling chiaki-ng, a PlayStation Remote Play client. Call get_usage_guide once for the full playbook "
+	"and get_usage_guide {topic: \"ps5\"} before operating the console.\n"
+	"Save time and tokens: list_routines first and run_routine for anything done before (it replays at button speed "
+	"and only returns a screenshot on failure); match_checkpoints tells you which known screen is showing without a "
+	"screenshot; after finishing a new task by hand, save_routine it with checkpoints so the next run is nearly free.\n"
 	"Workflow: take_screenshot to see the app (full window, native resolution, nothing cropped), then act, "
 	"then screenshot again to confirm. Coordinates for click/scroll/drag are pixels of the latest screenshot.\n"
 	"App UI (console list, settings, dialogs): use get_ui_tree / find_ui_elements to locate controls, then "
@@ -162,6 +168,7 @@ McpChiakiTools::McpChiakiTools(QmlMainWindow *window, const McpLaunchOptions &op
 		guarded_window->requestFrameCapture(callback);
 	});
 
+	routines = new McpRoutines(server, ui_tools, this);
 	RegisterTools();
 	RegisterPrompts();
 	connect(server, &McpServer::ToolCalled, this, [](const QString &name) { qCInfo(chiakiMcp) << "AI tool call:" << name; });
@@ -433,6 +440,13 @@ void McpChiakiTools::AddExamples()
 			{"buttons": ["ps"], "hold_ms": 1000},
 			{"steps": [{"left_stick": {"x": 0, "y": -1}, "hold_ms": 800}, {"buttons": ["r2"], "hold_ms": 300}]},
 			{"touch": {"x": 0.5, "y": 0.5}, "buttons": ["touchpad"]}])")},
+		{"run_routine", parse(R"([{"name": "ps5_go_home"}, {"name": "relaunch_youtube"}])")},
+		{"save_routine", parse(R"([{"name": "open_settings", "description": "From the PS5 home screen, open Settings", "retries": 1, "recovery": "ps5_go_home",
+			"steps": [{"routine": "ps5_go_home"}, {"checkpoint": "ps5_home", "timeout_ms": 8000},
+				{"controller": {"sequence": ["dpad_up", "dpad_right", "dpad_right"]}}, {"controller": {"buttons": ["cross"], "expect": {"until": "screen_changed"}}},
+				{"checkpoint": "ps5_settings", "timeout_ms": 5000}]}])")},
+		{"save_checkpoint", parse(R"([{"name": "ps5_home", "description": "PS5 home screen, Games tab, tile row focused"}])")},
+		{"get_usage_guide", parse(R"([{}, {"topic": "ps5"}])")},
 		{"window_control", parse(R"([{"action": "activate"}, {"action": "resize", "width": 1280, "height": 720}])")},
 		{"disconnect_stream", parse(R"([{}, {"sleep_console": true}])")},
 	};
@@ -514,11 +528,23 @@ void McpChiakiTools::RegisterTools()
 	server->AddTool({
 		"get_usage_guide",
 		"Get usage guide",
-		"Read this first: how to drive chiaki-ng and the PlayStation effectively (look-act-verify loop, controller cheat "
-		"sheet, timings, shortcuts, troubleshooting).",
-		Schema({}),
+		"Read this first. topic=general (default): how to drive chiaki-ng (look-act-verify loop, tools, shortcuts, "
+		"troubleshooting). topic=ps5: the PlayStation playbook (screen map, closing/launching apps, timings, routine "
+		"recipes, 24/7 automation).",
+		Schema({{"topic", QJsonObject{{"type", "string"}, {"enum", QJsonArray{"general", "ps5"}}, {"description", "Which guide (default general)"}}}}),
 		true,
-		[](const QJsonObject &, const McpServer::Responder &respond) {
+		[](const QJsonObject &args, const McpServer::Responder &respond) {
+			if(args.value("topic").toString() == QLatin1String("ps5"))
+			{
+				QFile guide(QStringLiteral(":/mcp/ps5-guide.md"));
+				if(guide.open(QIODevice::ReadOnly))
+				{
+					respond(McpServer::TextResult(QString::fromUtf8(guide.readAll())));
+					return;
+				}
+				respond(McpServer::ErrorResult(QStringLiteral("PS5 guide resource missing from this build")));
+				return;
+			}
 			respond(McpServer::TextResult(QString::fromUtf8(kUsageGuide)));
 		},
 	});
@@ -964,6 +990,7 @@ void McpChiakiTools::RegisterTools()
 		},
 	});
 
+	routines->RegisterTools();
 	AddExamples();
 
 	ui_tools->EnableScreenshotAfter(server, {

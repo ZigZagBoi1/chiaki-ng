@@ -1,4 +1,7 @@
 <RCC>
+  <qresource prefix="/mcp">
+    <file alias="ps5-guide.md">../../scripts/mcp/skills/chiaki-ps5/SKILL.md</file>
+  </qresource>
   <qresource prefix="/icons">
     <file>settings-20px.svg</file>
     <file>add-24px.svg</file>

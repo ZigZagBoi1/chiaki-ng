@@ -127,6 +127,32 @@ It checks the connection, takes full, annotated and zoomed screenshots (saved to
 | `controller_input` | Virtual DualSense: single presses (`buttons`), sequences (`sequence: ["dpad_down", "cross"]`) or full `steps` with sticks, triggers and touchpad |
 | `release_controller` | Release all virtual inputs immediately |
 
+## Routines and Checkpoints (Automation)
+
+Reading the console's screen and deciding on every button press is slow and costs AI tokens. For anything done
+more than once, the AI records a **routine** and replays it:
+
+- `save_routine`: a named list of steps (`controller`, `key`, `click_element`, `wait_ms`, `wait_for`,
+  `checkpoint`, `routine`, `ensure_stream`, `tool`), with `retries` and a `recovery` routine
+  (e.g. `ps5_go_home`) to get back to a known screen before retrying.
+- `run_routine`: replays it at button speed. A successful run returns a few lines of log and no
+  screenshot. A failed run reports the failing step plus one screenshot.
+- `save_checkpoint` / `match_checkpoints`: remember known screens (PS5 home, an app's start screen) and
+  recognize them later without a screenshot. Comparison tolerates the clock and animated tiles.
+- `list_routines`, `get_routine`, `delete_routine`, `stop_routine`, `delete_checkpoint`.
+
+Routines and checkpoints are saved in `mcp-routines.json` in chiaki-ng's app data folder and survive restarts.
+`ps5_go_home` (hold PS) and `ps5_control_center` are created on first use.
+
+Example: relaunch an app in a 24/7 loop with a single cheap call, `run_routine {"name": "relaunch_youtube"}`.
+
+## PS5 Skill
+
+`get_usage_guide {"topic": "ps5"}` gives any AI a PlayStation playbook: the screen map, launching and closing
+apps, dialogs, timings, how to build reliable routines and how to run 24/7 loops. The same text is a
+[Claude Code skill](https://github.com/streetpea/chiaki-ng/blob/main/scripts/mcp/skills/chiaki-ps5/SKILL.md){target="_blank" rel="noopener"}:
+copy `scripts/mcp/skills/chiaki-ps5` to `~/.claude/skills/` so Claude Code loads it automatically.
+
 ## Prompts
 
 Clients that support MCP prompts (e.g. as slash commands) get ready-made workflows:

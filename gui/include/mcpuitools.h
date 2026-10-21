@@ -51,6 +51,17 @@ class McpUiTools : public QObject
 		// Shared with the app specific tool set.
 		void TakeScreenshot(const QJsonObject &args, const McpServer::Responder &respond);
 		QJsonObject WindowInfo() const;
+		// Main frame plus all other app windows, composited (what take_screenshot shows, unencoded).
+		void GrabComposite(const std::function<void(const QImage &image, const QString &error)> &callback);
+
+		// Picture comparison shared by wait_for and routine checkpoints: a 256x144 grayscale thumbnail
+		// compared as a 16x9 grid of blocks.
+		static QImage Thumbnail(const QImage &frame);
+		// Largest mean difference (0-255) of any block: sensitive to small, local changes.
+		static double MaxBlockDifference(const QImage &a, const QImage &b);
+		// Share (0-1) of blocks whose mean difference is below block_threshold: tolerant to a clock
+		// or an animated tile, so it recognizes "the same screen".
+		static double BlockSimilarity(const QImage &a, const QImage &b, double block_threshold = 12.0);
 		// Which view/dialog/tab is showing and what has focus: "where am I" without a screenshot.
 		QJsonObject ScreenSummary() const;
 		// Runs generic health checks (window, capture, UI access, focus); results arrive asynchronously.
@@ -121,8 +132,7 @@ class McpUiTools : public QObject
 		QImage ComposeCanvas(const QList<Surface> &surfaces, const QImage &main_frame, QRect *canvas, double *scale, QJsonArray *layers) const;
 		// Front-to-back is the reverse of this; indices into surfaces.
 		QList<int> PaintOrder(const QList<Surface> &surfaces) const;
-		// Main frame plus all other app windows, composited (what take_screenshot shows, unencoded).
-		void GrabComposite(const std::function<void(const QImage &image, const QString &error)> &callback);
+
 
 		QPointer<QWindow> main_window;
 		QPointer<QQuickWindow> main_scene;

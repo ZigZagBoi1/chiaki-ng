@@ -49,6 +49,8 @@ class McpServer : public QObject
 		~McpServer() override;
 
 		void AddTool(const Tool &tool);
+		// Checks arguments against a tool's JSON schema (required, unknown, types, enums, nested objects).
+		static bool ValidateArguments(const QJsonObject &schema, const QJsonObject &args, QString *error);
 		QList<Tool> Tools() const { return tools; }
 
 		struct PromptArgument

@@ -59,6 +59,9 @@ class McpChiakiTools : public QObject
 		McpUiTools *ui_tools = nullptr;
 		McpRoutines *routines = nullptr;
 		quint64 controller_generation = 0;
+		// Latest reason a session failed or ended (e.g. "Remote is already in use"), for connect/wait tools.
+		QString last_session_error;
+		qint64 last_session_error_ms = 0;
 };
 
 #endif // CHIAKI_MCPCHIAKITOOLS_H

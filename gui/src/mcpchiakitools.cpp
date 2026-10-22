@@ -179,7 +179,24 @@ McpChiakiTools::McpChiakiTools(QmlMainWindow *window, const McpLaunchOptions &op
 		connect(settings, &QmlSettings::mcpServerEnabledChanged, this, &McpChiakiTools::ApplySettings);
 		connect(settings, &QmlSettings::mcpServerPortChanged, this, &McpChiakiTools::ApplySettings);
 		// A stream ending must not leave virtual buttons held for the next one.
-		connect(backend, &QmlBackend::sessionChanged, this, [this](StreamSession *) { controller_generation++; });
+		connect(backend, &QmlBackend::sessionChanged, this, [this](StreamSession *session) {
+			controller_generation++;
+			if(!session)
+				return;
+			connect(session, &StreamSession::SessionQuit, this, [this](ChiakiQuitReason reason, const QString &reason_str) {
+				last_session_error = QString::fromUtf8(chiaki_quit_reason_string(reason));
+				if(!reason_str.isEmpty())
+					last_session_error += QStringLiteral(" (%1)").arg(reason_str);
+				last_session_error_ms = QDateTime::currentMSecsSinceEpoch();
+			});
+		});
+		// Errors the UI shows in dialogs (connection, wake-up, registration) are what an agent needs to hear too.
+		auto record_error = [this](const QString &title, const QString &text) {
+			last_session_error = QStringLiteral("%1: %2").arg(title, QString(text).simplified());
+			last_session_error_ms = QDateTime::currentMSecsSinceEpoch();
+		};
+		connect(backend, &QmlBackend::sessionError, this, record_error);
+		connect(backend, &QmlBackend::error, this, record_error);
 	}
 	ApplySettings();
 }
@@ -296,6 +313,13 @@ QJsonObject McpChiakiTools::AppState() const
 		state["consoles"] = backend->hosts().size();
 		state["controllers_connected"] = backend->qmlControllers().size();
 	}
+	if(last_session_error_ms > 0 && QDateTime::currentMSecsSinceEpoch() - last_session_error_ms < 10 * 60 * 1000)
+		state["last_session_error"] = QJsonObject{
+			{"message", last_session_error},
+			{"seconds_ago", (QDateTime::currentMSecsSinceEpoch() - last_session_error_ms) / 1000},
+		};
+	if(session)
+		state["loading_complete"] = window->loadingTransitionComplete();
 	state["ui"] = ui_tools->WindowInfo().value("main_window");
 	state["location"] = ui_tools->ScreenSummary();
 	if(server && server->IsListening())
@@ -756,7 +780,7 @@ void McpChiakiTools::RegisterTools()
 		"consoles open the registration dialog instead. Follow up with wait + take_screenshot.",
 		Schema(host_props),
 		false,
-		[backend_or_error, find_host](const QJsonObject &args, const McpServer::Responder &respond) {
+		[self, backend_or_error, find_host](const QJsonObject &args, const McpServer::Responder &respond) {
 			QmlBackend *backend = backend_or_error(respond);
 			if(!backend)
 				return;
@@ -773,14 +797,54 @@ void McpChiakiTools::RegisterTools()
 				respond(McpServer::ErrorResult(QStringLiteral("A stream is already running; call disconnect_stream first")));
 				return;
 			}
+			if(!host.value("registered").toBool())
+			{
+				backend->connectToHost(index);
+				respond(McpServer::TextResult(QStringLiteral("%1 is not registered; the registration dialog was opened").arg(host.value("name").toString())));
+				return;
+			}
 			// Same as clicking the console in the UI.
+			const qint64 started = QDateTime::currentMSecsSinceEpoch();
 			if(host.value("discovered").toBool())
 				backend->connectToHost(index, host.value("name").toString());
 			else
 				backend->connectToHost(index);
-			respond(McpServer::TextResult(host.value("registered").toBool()
-					? QStringLiteral("Connecting to %1 ...").arg(host.value("name").toString())
-					: QStringLiteral("%1 is not registered; the registration dialog was opened").arg(host.value("name").toString())));
+			// Most rejections (console busy, wrong credentials) arrive within a second or two: report
+			// them here instead of letting the agent wait for a stream that will never come.
+			const QString name = host.value("name").toString();
+			auto elapsed = QSharedPointer<QElapsedTimer>::create();
+			elapsed->start();
+			auto poll = QSharedPointer<std::function<void()>>::create();
+			*poll = [self, name, started, elapsed, poll, respond]() {
+				if(!self || !self->window || !self->window->getBackend())
+					return;
+				auto finish = [self, poll, respond](const QJsonObject &result) {
+					QTimer::singleShot(0, self.data(), [poll]() { *poll = nullptr; });
+					respond(result);
+				};
+				StreamSession *session = self->window->getBackend()->qmlSession();
+				if(self->last_session_error_ms >= started)
+				{
+					QString hint;
+					if(self->last_session_error.contains(QLatin1String("in use"), Qt::CaseInsensitive))
+						hint = QStringLiteral(" Another app or device is already streaming from this console (only one Remote Play "
+								"session is allowed): end that session, then retry.");
+					finish(McpServer::ErrorResult(QStringLiteral("Could not connect to %1: %2.%3").arg(name, self->last_session_error, hint)));
+					return;
+				}
+				if(session && session->IsConnected())
+				{
+					finish(McpServer::TextResult(QStringLiteral("Connected to %1. Call wait_for_stream {state: \"video\"} before reading the screen.").arg(name)));
+					return;
+				}
+				if(elapsed->elapsed() >= 6000)
+				{
+					finish(McpServer::TextResult(QStringLiteral("Connecting to %1 (waking it can take ~20 s). Call wait_for_stream {state: \"video\"}.").arg(name)));
+					return;
+				}
+				QTimer::singleShot(250, self.data(), [poll]() { (*poll)(); });
+			};
+			(*poll)();
 		},
 	});
 
@@ -935,8 +999,10 @@ void McpChiakiTools::RegisterTools()
 			const int timeout_ms = qBound(0, args.value("timeout_ms").toInt(30000), 120000);
 			auto elapsed = QSharedPointer<QElapsedTimer>::create();
 			elapsed->start();
+			// An error from just before this call (e.g. connect_host rejected) also counts.
+			const qint64 started = QDateTime::currentMSecsSinceEpoch() - 10000;
 			auto poll = QSharedPointer<std::function<void()>>::create();
-			*poll = [self, wanted, timeout_ms, elapsed, poll, args, respond]() {
+			*poll = [self, wanted, timeout_ms, elapsed, started, poll, args, respond]() {
 				if(!self || !self->window || !self->window->getBackend())
 					return;
 				StreamSession *session = self->window->getBackend()->qmlSession();
@@ -946,9 +1012,12 @@ void McpChiakiTools::RegisterTools()
 				else if(wanted == QLatin1String("connected"))
 					met = session && session->IsConnected();
 				else
-					met = session && session->IsConnected() && self->window->hasVideo();
-				const bool timed_out = !met && elapsed->elapsed() >= timeout_ms;
-				if(!met && !timed_out)
+					// "video" means the console picture is really shown, not chiaki's loading screen.
+					met = session && session->IsConnected() && self->window->hasVideo() && self->window->loadingTransitionComplete();
+				// No session and a fresh error: the stream is not coming, stop waiting.
+				const bool failed = !met && wanted != QLatin1String("ended") && !session && self->last_session_error_ms >= started;
+				const bool timed_out = !met && !failed && elapsed->elapsed() >= timeout_ms;
+				if(!met && !timed_out && !failed)
 				{
 					QTimer::singleShot(250, self.data(), [poll]() { (*poll)(); });
 					return;
@@ -957,6 +1026,8 @@ void McpChiakiTools::RegisterTools()
 				QTimer::singleShot(0, self.data(), [poll]() { *poll = nullptr; });
 				QJsonObject summary = self->AppState();
 				summary["condition_met"] = met;
+				if(failed)
+					summary["failure"] = QStringLiteral("The session failed: %1").arg(self->last_session_error);
 				summary["timed_out"] = timed_out;
 				summary["elapsed_ms"] = qint64(elapsed->elapsed());
 				const QJsonObject text_result = McpServer::TextResult(ToJson(summary));

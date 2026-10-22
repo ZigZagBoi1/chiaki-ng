@@ -169,6 +169,12 @@ void McpRoutines::CallTool(const QString &name, const QJsonObject &args, const s
 	{
 		if(tool.name == name)
 		{
+			QString error;
+			if(!McpServer::ValidateArguments(tool.input_schema, args, &error))
+			{
+				callback(McpServer::ErrorResult(QStringLiteral("Invalid arguments for %1: %2").arg(name, error)));
+				return;
+			}
 			tool.handler(args, callback);
 			return;
 		}
@@ -218,6 +224,40 @@ bool McpRoutines::ValidateSteps(const QJsonArray &steps, const QString &routine_
 			if(tool.isEmpty() || kForbiddenTools.contains(tool))
 			{
 				*error = QStringLiteral("Step %1: tool step needs {name, args} and cannot call %2").arg(i).arg(kForbiddenTools.join(QStringLiteral(", ")));
+				return false;
+			}
+		}
+		// Check the arguments a step will pass, so a routine never saves something that cannot run.
+		QString target_tool;
+		QJsonObject target_args;
+		if(kind == QLatin1String("controller"))
+			target_tool = QStringLiteral("controller_input"), target_args = step.value("controller").toObject();
+		else if(kind == QLatin1String("click_element"))
+			target_tool = QStringLiteral("click_element"), target_args = step.value("click_element").toObject();
+		else if(kind == QLatin1String("key") && step.value("key").isObject())
+			target_tool = QStringLiteral("press_key"), target_args = step.value("key").toObject();
+		else if(kind == QLatin1String("wait_for"))
+			target_tool = QStringLiteral("wait_for"), target_args = step.value("wait_for").toObject();
+		else if(kind == QLatin1String("tool"))
+			target_tool = step.value("tool").toObject().value("name").toString(), target_args = step.value("tool").toObject().value("args").toObject();
+		if(!target_tool.isEmpty() && server)
+		{
+			bool found = false;
+			for(const McpServer::Tool &tool : server->Tools())
+			{
+				if(tool.name != target_tool)
+					continue;
+				found = true;
+				QString arg_error;
+				if(!McpServer::ValidateArguments(tool.input_schema, target_args, &arg_error))
+				{
+					*error = QStringLiteral("Step %1 (%2): %3").arg(i).arg(target_tool, arg_error);
+					return false;
+				}
+			}
+			if(!found)
+			{
+				*error = QStringLiteral("Step %1: unknown tool %2").arg(i).arg(target_tool);
 				return false;
 			}
 		}

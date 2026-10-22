@@ -94,6 +94,101 @@ void McpServer::AddTool(const Tool &tool)
 	tools.append(tool);
 }
 
+namespace
+{
+bool MatchesType(const QJsonValue &value, const QString &type)
+{
+	if(type == QLatin1String("string"))
+		return value.isString();
+	if(type == QLatin1String("boolean"))
+		return value.isBool();
+	if(type == QLatin1String("number"))
+		return value.isDouble();
+	if(type == QLatin1String("integer"))
+		return value.isDouble() && value.toDouble() == double(qint64(value.toDouble()));
+	if(type == QLatin1String("object"))
+		return value.isObject();
+	if(type == QLatin1String("array"))
+		return value.isArray();
+	return true;
+}
+
+bool ValidateValue(const QJsonObject &schema, const QJsonValue &value, const QString &path, QString *error)
+{
+	const QString type = schema.value("type").toString();
+	if(!type.isEmpty() && !MatchesType(value, type))
+	{
+		*error = QStringLiteral("'%1' must be %2 %3").arg(path, type == QLatin1String("integer") || type == QLatin1String("array") || type == QLatin1String("object") ? QStringLiteral("an") : QStringLiteral("a"), type);
+		return false;
+	}
+	if(schema.contains("enum"))
+	{
+		const QJsonArray allowed = schema.value("enum").toArray();
+		if(!allowed.contains(value))
+		{
+			QStringList names;
+			for(const QJsonValue &a : allowed)
+				names << a.toVariant().toString();
+			*error = QStringLiteral("'%1' must be one of: %2").arg(path, names.join(QStringLiteral(", ")));
+			return false;
+		}
+	}
+	if(value.isObject() && (schema.contains("properties") || schema.contains("required")))
+	{
+		const QJsonObject object = value.toObject();
+		const QJsonObject properties = schema.value("properties").toObject();
+		for(const QJsonValue &required : schema.value("required").toArray())
+		{
+			if(!object.contains(required.toString()))
+			{
+				*error = QStringLiteral("'%1' is missing required '%2'").arg(path, required.toString());
+				return false;
+			}
+		}
+		// Objects that declare properties are closed unless they opt out: a typo such as
+		// expect: {txt: ...} must fail before the action, not silently after it.
+		const QJsonValue additional = schema.value("additionalProperties");
+		const bool closed = additional.isBool() ? !additional.toBool() : schema.contains("properties");
+		for(auto it = object.constBegin(); it != object.constEnd(); ++it)
+		{
+			const QString child = path.isEmpty() ? it.key() : QStringLiteral("%1.%2").arg(path, it.key());
+			if(!properties.contains(it.key()))
+			{
+				if(closed)
+				{
+					*error = QStringLiteral("unknown parameter '%1'. Allowed: %2").arg(child, properties.keys().join(QStringLiteral(", ")));
+					return false;
+				}
+				continue;
+			}
+			if(!ValidateValue(properties.value(it.key()).toObject(), it.value(), child, error))
+				return false;
+		}
+	}
+	if(value.isArray() && schema.value("items").isObject())
+	{
+		const QJsonArray items = value.toArray();
+		for(int i = 0; i < items.size(); i++)
+			if(!ValidateValue(schema.value("items").toObject(), items[i], QStringLiteral("%1[%2]").arg(path).arg(i), error))
+				return false;
+	}
+	return true;
+}
+}
+
+bool McpServer::ValidateArguments(const QJsonObject &schema, const QJsonObject &args, QString *error)
+{
+	if(schema.isEmpty())
+		return true;
+	QString inner;
+	if(ValidateValue(schema, args, QString(), &inner))
+		return true;
+	// Top level paths read better without the leading "''".
+	inner.replace(QStringLiteral("'' is missing required"), QStringLiteral("missing required parameter"));
+	*error = inner;
+	return false;
+}
+
 void McpServer::AddToolExamples(const QString &tool_name, const QJsonArray &examples)
 {
 	auto it = tool_index.constFind(tool_name);
@@ -559,6 +654,13 @@ void McpServer::HandleRequest(const QJsonObject &request, const std::function<vo
 		if(!arguments.isUndefined() && !arguments.isNull() && !arguments.isObject())
 		{
 			done(RpcError(id, InvalidParams, QStringLiteral("Tool arguments must be an object")));
+			return;
+		}
+		// Reject malformed calls instead of guessing: a misspelled parameter must not silently act on the console.
+		QString schema_error;
+		if(!ValidateArguments(tools[it.value()].input_schema, arguments.toObject(), &schema_error))
+		{
+			done(RpcResult(id, ErrorResult(QStringLiteral("Invalid arguments for %1: %2. Nothing was done.").arg(name, schema_error))));
 			return;
 		}
 		emit ToolCalled(name);

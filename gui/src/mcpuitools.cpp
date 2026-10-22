@@ -271,8 +271,6 @@ QList<McpUiTools::Surface> McpUiTools::Surfaces() const
 			continue;
 		if(window->width() <= 0 || window->height() <= 0)
 			continue;
-		if(window->type() == Qt::Desktop)
-			continue;
 		Surface s;
 		s.window = window;
 		s.scene = qobject_cast<QQuickWindow *>(window);
